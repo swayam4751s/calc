@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Hand Gesture Calculator</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    <style>
+        body {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            font-family: Arial, sans-serif;
+            background: #f0f0f0;
+            padding: 20px;
+        }
+
+        .container {
+            display: flex;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .video-container {
+            position: relative;
+            width: 640px;
+            height: 480px;
+            border-radius: 10px;
+            overflow: hidden;
+            background: #000;
+        }
+
+        #video {
+            width: 100%;
+            height: 100%;
+            transform: scaleX(-1);
+        }
+
+        #canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            transform: scaleX(-1);
+        }
+
+        .calculator {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 0 20px rgba(0,0,0,0.1);
+            width: 300px;
+        }
+
+        #display {
+            width: 100%;
+            height: 60px;
+            margin-bottom: 20px;
+            text-align: right;
+            font-size: 24px;
+            border: none;
+            background: #f8f8f8;
+            border-radius: 5px;
+            padding: 10px;
+            box-sizing: border-box;
+        }
+
+        .instructions {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 0 20px rgba(0,0,0,0.1);
+            margin-top: 20px;
+            width: 100%;
+            max-width: 980px;
+        }
+
+        .gesture-hint {
+            margin: 10px 0;
+            font-size: 16px;
+            color: #333;
+        }
+
+        #status {
+            font-size: 18px;
+            color: #666;
+            margin-bottom: 10px;
+        }
+
+        #gesture {
+            font-size: 24px;
+            color: #2196F3;
+            margin-bottom: 20px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="video-container">
+            <video id="video" playsinline></video>
+            <canvas id="canvas"></canvas>
+        </div>
+        
+        <div class="calculator">
+            <div id="status">Status: Initializing...</div>
+            <div id="gesture">No gesture detected</div>
+            <input type="text" id="display" readonly value="0">
+        </div>
+    </div>
+
+    <div class="instructions">
+        <h2>Hand Gesture Instructions:</h2>
+        <div class="gesture-hint">✌️ Peace Sign (2 fingers): Enter number 2</div>
+        <div class="gesture-hint">👌 OK Sign: Enter number 0</div>
+        <div class="gesture-hint">☝️ One Finger: Enter number 1</div>
+        <div class="gesture-hint">🖐️ Open Palm: Enter number 5</div>
+        <div class="gesture-hint">👆 Point Up + Move Right: Addition</div>
+        <div class="gesture-hint">👆 Point Up + Move Left: Subtraction</div>
+        <div class="gesture-hint">👆 Point Up + Move Down: Multiplication</div>
+        <div class="gesture-hint">👆 Point Up + Move Up: Division</div>
+        <div class="gesture-hint">✊ Closed Fist: Clear calculator</div>
+    </div>
+
+    <script>
+        const videoElement = document.getElementById('video');
+        const canvasElement = document.getElementById('canvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        const display = document.getElementById('display');
+        const statusDiv = document.getElementById('status');
+        const gestureDiv = document.getElementById('gesture');
+
+        let currentValue = 0;
+        let lastOperator = '+';
+        let lastGesture = null;
+        let lastHandPosition = null;
+        let isCalculating = false;
+        let pendingOperation = null;
+        let firstNumber = null;
+        let synth = window.speechSynthesis;
+
+        function speak(text) {
+            if (synth.speaking) {
+                synth.cancel();
+            }
+            const utterance = new SpeechSynthesisUtterance(text);
+            synth.speak(utterance);
+        }
+
+        function onResults(results) {
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                const landmarks = results.multiHandLandmarks[0];
+
+                drawConnectors(canvasCtx, landmarks, HAND_CONNECTIONS,
+                    {color: '#00FF00', lineWidth: 5});
+                drawLandmarks(canvasCtx, landmarks,
+                    {color: '#FF0000', lineWidth: 2});
+
+                const gesture = detectGesture(landmarks);
+                if (gesture !== lastGesture) {
+                    handleGesture(gesture);
+                    lastGesture = gesture;
+                }
+
+                if (gesture === 'point' && lastHandPosition) {
+                    const movement = detectMovement(landmarks[8], lastHandPosition);
+                    if (movement && !isCalculating) {
+                        handleOperation(movement);
+                        isCalculating = true;
+                        setTimeout(() => { isCalculating = false; }, 1000);
+                    }
+                }
+                lastHandPosition = landmarks[8];
+            }
+
+            canvasCtx.restore();
+        }
+
+        const hands = new Hands({locateFile: (file) => {
+            return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+        }});
+
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+
+        hands.onResults(onResults);
+
+        const camera = new Camera(videoElement, {
+            onFrame: async () => {
+                await hands.send({image: videoElement});
+            },
+            width: 640,
+            height: 480
+        });
+
+        camera.start()
+            .then(() => {
+                statusDiv.textContent = 'Status: Camera ready';
+                speak('Camera ready. Make gestures to calculate.');
+                canvasElement.width = videoElement.videoWidth;
+                canvasElement.height = videoElement.videoHeight;
+            })
+            .catch((err) => {
+                console.error(err);
+                statusDiv.textContent = 'Error: Cannot access camera';
+                speak('Error: Cannot access camera');
+            });
+
+        function detectGesture(landmarks) {
+            const thumb = landmarks[4];
+            const index = landmarks[8];
+            const middle = landmarks[12];
+            const ring = landmarks[16];
+            const pinky = landmarks[20];
+
+            if (allFingersClosed(landmarks)) {
+                return 'fist';
+            }
+
+            if (isFingerExtended(index) && isFingerExtended(middle) &&
+                !isFingerExtended(ring) && !isFingerExtended(pinky)) {
+                return 'peace';
+            }
+
+            if (isFingerExtended(index) && !isFingerExtended(middle) &&
+                !isFingerExtended(ring) && !isFingerExtended(pinky)) {
+                return 'point';
+            }
+
+            if (distance(thumb, index) < 0.1) {
+                return 'ok';
+            }
+
+            if (isFingerExtended(index) && isFingerExtended(middle) &&
+                isFingerExtended(ring) && isFingerExtended(pinky)) {
+                return 'palm';
+            }
+
+            return null;
+        }
+
+        function isFingerExtended(finger) {
+            return finger.y < 0.5;
+        }
+
+        function allFingersClosed(landmarks) {
+            return landmarks[8].y > 0.6 && landmarks[12].y > 0.6 &&
+                   landmarks[16].y > 0.6 && landmarks[20].y > 0.6;
+        }
+
+        function distance(p1, p2) {
+            return Math.sqrt(Math.pow(p2.x - p1.x, 2) + Math.pow(p2.y - p1.y, 2));
+        }
+
+        function detectMovement(current, last) {
+            const dx = current.x - last.x;
+            const dy = current.y - last.y;
+            const threshold = 0.1;
+
+            if (Math.abs(dx) > threshold || Math.abs(dy) > threshold) {
+                if (Math.abs(dx) > Math.abs(dy)) {
+                    return dx > 0 ? 'right' : 'left';
+                } else {
+                    return dy > 0 ? 'down' : 'up';
+                }
+            }
+            return null;
+        }
+
+        function handleGesture(gesture) {
+            if (!gesture) return;
+
+            let number;
+            switch (gesture) {
+                case 'peace':
+                    number = 2;
+                    break;
+                case 'ok':
+                    number = 0;
+                    break;
+                case 'point':
+                    number = 1;
+                    break;
+                case 'palm':
+                    number = 5;
+                    break;
+                case 'fist':
+                    currentValue = 0;
+                    display.value = '0';
+                    lastOperator = '+';
+                    firstNumber = null;
+                    pendingOperation = null;
+                    gestureDiv.textContent = 'Calculator cleared';
+                    speak('Calculator cleared');
+                    return;
+            }
+
+            if (number !== undefined) {
+                if (pendingOperation) {
+                    currentValue = calculateResult(firstNumber, number, pendingOperation);
+                    display.value = currentValue;
+                    speak(`${firstNumber} ${pendingOperation} ${number} equals ${currentValue}`);
+                    firstNumber = null;
+                    pendingOperation = null;
+                } else {
+                    currentValue = number;
+                    display.value = currentValue;
+                    speak(`Number ${number}`);
+                }
+                gestureDiv.textContent = `Number: ${number}`;
+            }
+        }
+
+        function handleOperation(movement) {
+            let operation;
+            switch (movement) {
+                case 'right':
+                    operation = '+';
+                    speak('Plus');
+                    break;
+                case 'left':
+                    operation = '-';
+                    speak('Minus');
+                    break;
+                case 'down':
+                    operation = '*';
+                    speak('Multiply');
+                    break;
+                case 'up':
+                    operation = '/';
+                    speak('Divide');
+                    break;
+            }
+
+            if (operation) {
+                firstNumber = parseFloat(display.value);
+                pendingOperation = operation;
+                gestureDiv.textContent = `Operation: ${operation}`;
+            }
+        }
+
+        function calculateResult(num1, num2, operation) {
+            switch (operation) {
+                case '+':
+                    return num1 + num2;
+                case '-':
+                    return num1 - num2;
+                case '*':
+                    return num1 * num2;
+                case '/':
+                    return num2 !== 0 ? num1 / num2 : (() => {
+                        speak('Cannot divide by zero');
+                        return num1;
+                    })();
+                default:
+                    return num2;
+            }
+        }
+    </script>
+</body>
+</html>
